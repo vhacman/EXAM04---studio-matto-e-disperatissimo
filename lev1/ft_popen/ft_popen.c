@@ -1,86 +1,114 @@
+/* ************************************************************************** */
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   ft_popen.c                                         :+:      :+:    :+:   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: vhacman <vhacman@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2025/10/23 17:15:35 by vhacman           #+#    #+#             */
+/*   Updated: 2025/10/23 17:24:49 by vhacman          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <stdio.h>
 
-// Gestisce il processo figlio dopo il fork
+/*
+**   - fd[2]: pipe creata [0]=lettura, [1]=scrittura
+**   - file: path o nome del comando da eseguire
+**   - argv: array di argomenti per il comando (terminato con NULL)
+**   - type: 'r' per lettura (comando scrive), 'w' per scrittura (comando legge)
+  - type == 'r' (Read mode):
+**      * Reindirizza stdout del figlio su fd[1] (scrittura della pipe)
+**      * Il padre leggerà da fd[0] l'output del comando
+  - type == 'w' (Write mode):
+**      * Reindirizza stdin del figlio da fd[0] (lettura della pipe)
+**      * Il padre scriverà su fd[1] che il figlio leggerà dallo stdin
+*/
 void	handleChild(int fd[2], const char *file, char *const argv[], char type)
 {
-	// Se tipo è 'r' (read), redirige stdout verso la pipe
-	// così l'output del comando va nella pipe
 	if (type == 'r')
 	{
-		// Duplica il descrittore di scrittura della pipe su stdout
 		if(dup2(fd[1], STDOUT_FILENO) == -1)
 			exit(1);
 	}
-	// Se tipo è 'w' (write), redirige stdin dalla pipe
-	// così il comando legge input dalla pipe
 	else
 	{
-		// Duplica il descrittore di lettura della pipe su stdin
 		if(dup2(fd[0], STDIN_FILENO) == -1)
 			exit(1);
 	}
-	// Chiude entrambi i descrittori originali della pipe
-	// (non servono più dopo il dup2)
 	close(fd[0]);
 	close(fd[1]);
-	// Esegue il comando sostituendo il processo figlio
 	execvp(file, argv);
-	// Se execvp fallisce, esce con errore
 	exit(1);
 }
 
-// Gestisce il processo padre dopo il fork
+/*
+** Operazioni in base al tipo:
+**   - type == 'r' (Read mode):
+**      * Chiude fd[1] perché il padre non scrive
+**      * Ritorna fd[0] per leggere l'output del comando
+**   - type == 'w' (Write mode):
+**      * Chiude fd[0] perché il padre non legge
+**      * Ritorna fd[1] per scrivere l'input del comando
+**
+** Ritorno: il file descriptor da usare nel padre (fd[0] o fd[1])
+*/
 int	handleParent(int fd[2], char type)
 {
-	// Se tipo è 'r' (read), il padre leggerà dalla pipe
 	if(type == 'r')
 	{
-		// Chiude il lato scrittura (non serve al padre)
 		close(fd[1]);
-		// Ritorna il descrittore di lettura
 		return (fd[0]);
 	}
-	// Se tipo è 'w' (write), il padre scriverà nella pipe
 	else
 	{
-		// Chiude il lato lettura (non serve al padre)
 		close(fd[0]);
-		// Ritorna il descrittore di scrittura
 		return (fd[1]);
 	}
 }
 
-// Crea un processo figlio che esegue un comando e ritorna un file descriptor
-// per comunicare con esso tramite pipe
+/*
+** ft_popen: Apre un comando come se fosse un file per leggere o scrivere
+**           Simula il comportamento della funzione standard POSIX popen()
+**
+** Parametri:
+**   - file: path o nome del comando da eseguire (es: "ls", "/bin/cat")
+**   - argv: array di argomenti per il comando, primo elemento è il comando stesso
+**           Deve terminare con NULL (es: {"ls", "-la", NULL})
+**   - type: 'r' per leggere l'output del comando
+**          'w' per scrivere l'input del comando
+** Validazioni:
+**   1. Controlla che file non sia NULL
+**   2. Controlla che argv non sia NULL
+**   3. Controlla che argv[0] non sia NULL
+**   4. Controlla che type sia 'r' o 'w'
+
+**   1. Crea una pipe con pipe()
+**   2. Crea un processo figlio con fork()
+**   3. Nel figlio: chiama handleChild() per eseguire il comando
+**   4. Nel padre: chiama handleParent() per ritornare il file descriptor corretto
+*/
 int	ft_popen(const char *file, char *const argv[], char type)
 {
-	int		fd[2];  // Array per i descrittori della pipe
-	pid_t	pid;    // ID del processo
+	int		fd[2];
+	pid_t	pid;
 
-	// Validazione parametri: controlla che i parametri siano validi
-	// e che type sia 'r' (read) o 'w' (write)
 	if(!file || !argv || !argv[0] || (type != 'r' && type != 'w'))
 		return (-1);
-	// Crea la pipe: fd[0] per leggere, fd[1] per scrivere
 	if(pipe(fd) == -1)
 		return (-1);
-	// Crea un processo figlio
 	pid = fork();
 	if (pid == -1)
 	{
-		// Se fork fallisce, chiude la pipe e ritorna errore
 		close(fd[0]);
 		close(fd[1]);
 		return (-1);
 	}
-	// Codice eseguito solo dal processo figlio (pid == 0)
 	if (pid == 0)
 		handleChild(fd, file, argv, type);
-	// Codice eseguito solo dal processo padre
-	// Ritorna il descrittore appropriato per comunicare col figlio
 	return (handleParent(fd, type));
 }
 

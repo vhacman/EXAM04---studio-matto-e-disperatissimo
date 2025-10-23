@@ -1,0 +1,243 @@
+==================================================================================
+                        PICOSHELL DOCUMENTATION
+==================================================================================
+
+L'esercizio richiede di creare una funzione che esegua una PIPELINE di comandi,
+proprio come fa una shell quando usa il carattere "|" (pipe).
+
+Esempio shell: ls | grep picoshell | wc -l
+- ls genera output
+- grep legge l'output di ls e filtra
+- wc legge l'output di grep e conta le righe
+
+La funzione picoshell deve:
+- Ricevere un array di comandi (ciascuno già preparato come argv)
+- Creare N-1 pipe per N comandi
+- Eseguire ogni comando in un processo figlio separato
+- Collegare l'output di ogni comando all'input del successivo
+- Attendere che tutti i comandi terminino
+- Gestire correttamente gli errori e chiudere tutti i file descriptor
+
+==================================================================================
+                           FIRMA DELLA FUNZIONE
+==================================================================================
+
+int picoshell(char **cmds[]);
+
+Parametri:
+- cmds: array di puntatori a array di stringhe (char**)
+  - cmds[0] = primo comando (es: {"ls", "-l", NULL})
+  - cmds[1] = secondo comando (es: {"grep", "txt", NULL})
+  - cmds[N] = NULL (terminatore)
+
+Return:
+- 0: successo (tutti i comandi eseguiti e terminati)
+- 1: errore (pipe, fork, o altro fallimento)
+
+
+==================================================================================
+                        1. STRUTTURA DEI DATI
+==================================================================================
+
+1.1 FORMATO DI cmds[]
+---------------------
+cmds è un array tridimensionale concettuale:
+
+char **cmds[] = {
+    {"ls", "-l", NULL},         // cmds[0] - primo comando
+    {"grep", "txt", NULL},      // cmds[1] - secondo comando
+    {"wc", "-l", NULL},         // cmds[2] - terzo comando
+    NULL                        // cmds[3] - terminatore
+};
+
+Ogni cmds[i] è un argv[] pronto per execvp:
+- cmds[i][0] = nome comando
+- cmds[i][1..N-1] = argomenti
+- cmds[i][N] = NULL
+
+1.2 NUMERO DI PIPE NECESSARIE
+------------------------------
+Per N comandi servono N-1 pipe:
+
+1 comando:  0 pipe  (nessuna connessione)
+2 comandi:  1 pipe  (cmd1 | cmd2)
+3 comandi:  2 pipe  (cmd1 | cmd2 | cmd3)
+N comandi:  N-1 pipe
+
+Esempio con 3 comandi:
+    [cmd1] --pipe0--> [cmd2] --pipe1--> [cmd3]
+
+==================================================================================
+                        2. CONCETTI FONDAMENTALI
+==================================================================================
+
+2.1 PIPELINE (CATENA DI COMANDI)
+--------------------------------
+Una pipeline collega l'output (stdout) di un comando all'input (stdin)
+del comando successivo.
+
+Shell:  ls | grep txt
+Significato:
+- ls scrive su stdout
+- grep legge da stdin
+- La pipe collega lo stdout di ls allo stdin di grep
+
+2.2 MULTIPLE PIPES
+------------------
+Con più di 2 comandi, servono più pipe:
+
+    cmd1 | cmd2 | cmd3
+
+Necessita di:
+- pipe[0]: collega cmd1 → cmd2
+- pipe[1]: collega cmd2 → cmd3
+
+Visualizzazione:
+    [cmd1]          [cmd2]          [cmd3]
+      stdout → pipe0[1]
+               pipe0[0] → stdin
+                         stdout → pipe1[1]
+                                  pipe1[0] → stdin
+
+2.3 REGOLE DI REDIREZIONE
+--------------------------
+Per ogni comando nella pipeline:
+
+PRIMO COMANDO (i=0):
+- stdin: NORMALE (tastiera/input originale)
+- stdout: rediretto su pipe[0][1] (scrive nella prima pipe)
+
+COMANDI INTERMEDI (0 < i < N-1):
+- stdin: rediretto da pipe[i-1][0] (legge dalla pipe precedente)
+- stdout: rediretto su pipe[i][1] (scrive nella pipe successiva)
+
+ULTIMO COMANDO (i=N-1):
+- stdin: rediretto da pipe[i-1][0] (legge dall'ultima pipe)
+- stdout: NORMALE (schermo/output originale)
+
+2.4 GESTIONE FILE DESCRIPTOR
+-----------------------------
+REGOLA FONDAMENTALE: Ogni processo deve chiudere TUTTI i file descriptor
+                      delle pipe che non usa direttamente.
+
+Perché?
+- Se un fd di scrittura rimane aperto, il lettore non riceve EOF
+- Se un fd di lettura rimane aperto, si sprecano risorse
+- I fd vengono ereditati dai processi figli dopo fork()
+
+Esempio con 2 comandi (1 pipe):
+
+PADRE (dopo fork):
+- Non usa la pipe per I/O diretto
+- DEVE chiudere pipe[0][0] E pipe[0][1]
+
+FIGLIO 1 (cmd1):
+- Usa solo pipe[0][1] per scrivere
+- DEVE chiudere pipe[0][0]
+
+FIGLIO 2 (cmd2):
+- Usa solo pipe[0][0] per leggere
+- DEVE chiudere pipe[0][1]
+
+
+==================================================================================
+                        7. FUNZIONI CONSENTITE
+==================================================================================
+
+close(int fd)
+-------------
+Chiude un file descriptor.
+Usato per chiudere le estremità delle pipe non necessarie.
+
+fork(void)
+----------
+Crea un processo figlio identico al padre.
+- Return: 0 nel figlio, PID nel padre, -1 in caso di errore
+- Dopo fork(), entrambi i processi continuano l'esecuzione
+- I fd aperti vengono ereditati dal figlio
+
+wait(int *status)
+-----------------
+Attende che un processo figlio termini.
+- status: può essere NULL se non interessa il codice di uscita
+- Return: PID del figlio terminato, -1 in caso di errore
+- Blocca il processo chiamante finché un figlio non termina
+
+exit(int status)
+----------------
+Termina il processo corrente.
+- status: codice di uscita (0 = successo, altro = errore)
+- Usato nel figlio se execvp() fallisce
+- Differente da return!
+
+execvp(const char *file, char *const argv[])
+--------------------------------------------
+Sostituisce il processo corrente con un nuovo programma.
+- file: nome del comando (cerca nel PATH)
+- argv: array di argomenti (argv[0] = nome, argv[N] = NULL)
+- Non ritorna se ha successo
+- Return: -1 solo in caso di errore
+
+Esempio:
+    char *args[] = {"ls", "-l", NULL};
+    execvp("ls", args);
+    // Se arrivi qui, execvp è fallito
+    exit(1);
+
+dup2(int oldfd, int newfd)
+--------------------------
+Duplica un file descriptor.
+- Chiude newfd se era aperto
+- Fa sì che newfd punti allo stesso file/pipe di oldfd
+- Return: newfd in caso di successo, -1 in caso di errore
+
+Uso tipico:
+    dup2(pipe_fd[0], STDIN_FILENO);   // stdin legge dalla pipe
+    dup2(pipe_fd[1], STDOUT_FILENO);  // stdout scrive nella pipe
+
+pipe(int pipefd[2])
+-------------------
+Crea una pipe per la comunicazione tra processi.
+- pipefd[0]: file descriptor per leggere
+- pipefd[1]: file descriptor per scrivere
+- Return: 0 in caso di successo, -1 in caso di errore
+
+Esempio:
+    int fd[2];
+    pipe(fd);
+    // fd[0] → lettura
+    // fd[1] → scrittura
+
+==================================================================================
+                        8. SCHEMA RIASSUNTIVO
+==================================================================================
+
+STRUTTURA GENERALE:
+1. Count commands → num_cmds
+2. Allocate pipes[num_cmds - 1]
+3. Create all pipes
+4. For each command:
+   - fork()
+   - Child: redirect, close all pipes, execvp()
+5. Parent: close all pipes
+6. Parent: wait all children
+7. Free memory
+8. Return 0
+
+REDIREZIONI PER COMANDO i:
+- if (i > 0):           dup2(pipes[i-1][0], STDIN)
+- if (i < num_cmds-1):  dup2(pipes[i][1], STDOUT)
+- Chiudere TUTTE le pipes dopo dup2
+
+CHIUSURE:
+- Figlio: chiude tutte le pipe dopo dup2, prima di execvp
+- Padre: chiude tutte le pipe dopo aver creato tutti i figli
+
+MEMORIA:
+- Allocare: pipes = malloc(num_pipes * sizeof(int*))
+- Per ogni i: pipes[i] = malloc(2 * sizeof(int))
+- Liberare tutto prima di return (sia successo che errore)
+
+RETURN:
+- 0: successo
+- 1: errore (dopo cleanup completo)
