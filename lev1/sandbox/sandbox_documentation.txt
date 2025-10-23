@@ -1,0 +1,388 @@
+==================================================================================
+                        SANDBOX DOCUMENTATION
+==================================================================================
+L'esercizio richiede di creare una funzione che esegua un'altra funzione in
+un ambiente isolato e controllato (sandbox), monitorandone l'esecuzione e
+rilevando eventuali errori, crash o timeout.
+
+La funzione deve:
+- Eseguire la funzione passata come parametro in un processo figlio separato
+- Impostare un timeout massimo di esecuzione tramite alarm()
+- Rilevare se la funzione termina correttamente, crasha, o va in timeout
+- Stampare messaggi diagnostici se verbose è true
+- Restituire 1 se la funzione si comporta correttamente (exit(0))
+- Restituire 0 se la funzione fallisce (exit code != 0, signal, timeout)
+- Restituire -1 in caso di errori nella sandbox stessa
+
+==================================================================================
+                           FIRMA DELLA FUNZIONE
+==================================================================================
+
+int sandbox(void (*f)(void), unsigned int timeout, bool verbose);
+
+Parametri:
+- f: puntatore alla funzione da eseguire (void function(void))
+- timeout: numero di secondi dopo i quali terminare la funzione (via SIGALRM)
+- verbose: se true, stampa messaggi diagnostici
+
+Valori di ritorno:
+- 1: funzione eseguita correttamente (exit 0)
+- 0: funzione fallita (exit != 0, crash, timeout)
+- -1: errore nella sandbox (f == NULL, fork fallito, waitpid fallito)
+
+==================================================================================
+
+1. CONCETTI FONDAMENTALI
+==================================================================================
+
+1.1 SANDBOX (AMBIENTE ISOLATO)
+-------------------------------
+Un sandbox è un ambiente di esecuzione isolato che permette di eseguire codice
+potenzialmente pericoloso senza rischi per il programma principale.
+
+Caratteristiche:
+- Esecuzione in un processo separato (via fork)
+- Monitoraggio dello stato di terminazione
+- Timeout automatico per prevenire loop infiniti
+- Gestione di crash e segnali
+
+Casi d'uso:
+- Testing di funzioni che potrebbero crashare
+- Esecuzione di codice non fidato
+- Prevenzione di loop infiniti
+- Isolamento di errori
+
+1.2 FORK
+--------
+fork() crea un processo figlio che è una copia del padre:
+- Restituisce 0 al figlio
+- Restituisce PID del figlio al padre
+- Restituisce -1 in caso di errore
+- Il figlio eredita memoria, file descriptors, ma ha PID diverso
+
+1.3 ALARM
+---------
+alarm(seconds) imposta un timer che invia SIGALRM al processo:
+- Dopo 'seconds' secondi, il processo riceve SIGALRM
+- Se non gestito, SIGALRM termina il processo
+- Usato per implementare timeout
+- alarm(0) cancella un alarm precedente
+
+1.4 WAITPID
+-----------
+waitpid(pid, &status, options) aspetta che un processo figlio termini:
+- pid: PID del processo da attendere (-1 per qualsiasi figlio)
+- status: variabile dove salvare lo stato di uscita
+- options: flag di comportamento (0 = attesa bloccante)
+- Restituisce PID del figlio terminato, o -1 in caso di errore
+
+1.5 ANALISI DELLO STATUS
+-------------------------
+Lo status restituito da waitpid contiene informazioni su COME il processo è
+terminato. Ci sono macro per estrarre queste informazioni:
+
+WIFEXITED(status):
+- Ritorna true se il processo è terminato normalmente (via exit o return)
+- Usato per distinguere uscite normali da crash
+
+WEXITSTATUS(status):
+- Estrae il codice di uscita (l'argomento di exit())
+- Valido solo se WIFEXITED(status) == true
+- Esempio: exit(42) -> WEXITSTATUS(status) == 42
+
+WIFSIGNALED(status):
+- Ritorna true se il processo è stato terminato da un segnale
+- Usato per rilevare crash (SIGSEGV), kill, timeout (SIGALRM), etc.
+
+WTERMSIG(status):
+- Estrae il numero del segnale che ha terminato il processo
+- Valido solo se WIFSIGNALED(status) == true
+- Esempio: segfault -> WTERMSIG(status) == SIGSEGV (11)
+
+1.4 SEGNALI COMUNI
+------------------
+- SIGSEGV (11): Segmentation fault (accesso memoria invalida)
+- SIGALRM (14): Alarm signal (timeout)
+- SIGKILL (6): Kill signal (terminazione forzata, non catturabile)
+- SIGTERM (15): Termination signal (terminazione gentile)
+- SIGABRT (4): Abort signal (da abort())
+
+
+2. LOGICA DI IMPLEMENTAZIONE
+==================================================================================
+
+2.1 STRUTTURA GENERALE
+-----------------------
+La funzione sandbox segue questo flow:
+
+1. Validazione parametri
+2. Creazione processo figlio (fork)
+3. Nel FIGLIO: imposta alarm + esegue funzione + exit(0)
+4. Nel PADRE: attende terminazione figlio (waitpid)
+5. Analizza status per determinare successo/fallimento
+4. Ritorna risultato appropriato
+
+2.2 VALIDAZIONE PARAMETRI
+--------------------------
+if (!f)
+    return (-1);
+
+La funzione deve essere non-NULL, altrimenti non c'è niente da eseguire.
+
+2.3 FORK DEL PROCESSO
+---------------------
+pid = fork();
+if (pid == -1)
+    return (-1);
+
+Gestione errori critici: se fork fallisce (memoria insufficiente, troppi
+processi, etc.) la sandbox non può procedere.
+
+2.4 CODICE NEL FIGLIO
+---------------------
+if (pid == 0)
+{
+    alarm(timeout);  // Imposta timeout
+    f();             // Esegue la funzione
+    exit(0);         // Termina con successo
+}
+
+Flow nel figlio:
+1. alarm(timeout) -> tra 'timeout' secondi riceverà SIGALRM
+2. f() -> esegue la funzione da testare
+3. exit(0) -> se f() ritorna normalmente, esce con codice 0
+
+Casi possibili:
+- f() ritorna normalmente -> exit(0) -> WEXITSTATUS = 0
+- f() chiama exit(N) con N != 0 -> WEXITSTATUS = N
+- f() crasha (SIGSEGV, etc.) -> WIFSIGNALED = true
+- f() va in loop infinito -> dopo timeout arriva SIGALRM -> WIFSIGNALED = true
+
+2.5 CODICE NEL PADRE
+--------------------
+if (waitpid(pid, &status, 0) == -1)
+    return (-1);
+
+Il padre attende che il figlio termini e ottiene lo status.
+Se waitpid fallisce (es. il figlio non esiste più), ritorna errore.
+
+2.4 ANALISI DELLO STATUS
+-------------------------
+if (WIFEXITED(status))
+    return (handle_exit(status, verbose));
+
+Se il processo è terminato normalmente (via exit):
+- Estrae il codice di uscita con WEXITSTATUS
+- Se exit_code == 0 -> funzione OK -> return 1
+- Se exit_code != 0 -> funzione BAD -> return 0
+
+if (WIFSIGNALED(status))
+    return (handle_signal(status, timeout, verbose));
+
+Se il processo è stato terminato da un segnale:
+- Estrae il segnale con WTERMSIG
+- Casi: SIGALRM (timeout), SIGSEGV (crash), etc.
+- Sempre return 0 (funzione BAD)
+
+Se nessuna delle due condizioni -> return -1 (stato sconosciuto)
+
+
+3. FUNZIONI HELPER
+==================================================================================
+
+3.1 handle_exit
+---------------
+Gestisce il caso in cui il processo figlio termina normalmente.
+
+int handle_exit(int status, bool verbose)
+{
+    int exit_code = WEXITSTATUS(status);
+
+    if (exit_code == 0)
+    {
+        if (verbose)
+            printf("Nice function!\n");
+        return (1);  // SUCCESSO
+    }
+    if (verbose)
+        printf("Bad function: exited with code %d\n", exit_code);
+    return (0);  // FALLIMENTO
+}
+
+Logica:
+- exit_code == 0: la funzione si è comportata bene
+- exit_code != 0: la funzione ha chiamato exit con codice di errore
+
+3.2 handle_signal
+-----------------
+Gestisce il caso in cui il processo figlio viene terminato da un segnale.
+
+int handle_signal(int status, unsigned int timeout, bool verbose)
+{
+    int sig = WTERMSIG(status);
+
+    if (verbose)
+    {
+        if (sig == SIGALRM)
+            printf("Bad function: timed out after %u seconds\n", timeout);
+        else
+            printf("Bad function: %s\n", strsignal(sig));
+    }
+    return (0);  // SEMPRE FALLIMENTO
+}
+
+Logica:
+- SIGALRM: timeout raggiunto (loop infinito, sleep troppo lungo)
+- Altri segnali: crash (SIGSEGV), kill manuale, etc.
+- strsignal(sig): converte numero segnale in stringa descrittiva
+
+ CONDIZIONI DA RISPETTARE
+==================================================================================
+
+Validazione Parametri
+--------------------------
+✓ f != NULL (altrimenti return -1)
+✓ timeout può essere qualsiasi unsigned int (anche 0)
+✓ verbose può essere true o false
+
+Gestione Errori Sandbox
+----------------------------
+✓ fork() fallisce -> return -1
+✓ waitpid() fallisce -> return -1
+✓ Status sconosciuto (né EXITED né SIGNALED) -> return -1
+
+Valori di Ritorno
+---------------------
+✓ 1: solo se WIFEXITED && WEXITSTATUS == 0
+✓ 0: per qualsiasi altro tipo di fallimento (exit != 0, segnali)
+✓ -1: errori della sandbox stessa
+
+Processo Figlio
+-------------------
+✓ DEVE chiamare exit(0) se la funzione ritorna normalmente
+✓ Se la funzione chiama exit() esplicitamente, quel codice viene usato
+✓ Se la funzione crasha, il kernel gestisce automaticamente
+✓ alarm() DEVE essere impostato prima di chiamare f()
+
+ Output Verbose
+------------------
+✓ Stampare solo se verbose == true
+✓ "Nice function!" per successo
+✓ "Bad function: exited with code X" per exit != 0
+✓ "Bad function: timed out after X seconds" per SIGALRM
+✓ "Bad function: <signal description>" per altri segnali
+
+
+4. FUNZIONI CONSENTITE E IL LORO USO
+==================================================================================
+
+fork(void)
+----------
+Crea un processo figlio.
+- return: 0 nel figlio, PID nel padre, -1 errore
+
+alarm(unsigned int seconds)
+---------------------------
+Imposta un timer per inviare SIGALRM al processo.
+- seconds: secondi dopo i quali inviare il segnale
+- return: secondi rimanenti di un alarm precedente (0 se nessuno)
+
+waitpid(pid_t pid, int *status, int options)
+--------------------------------------------
+Attende la terminazione di un processo specificato.
+- pid: PID del processo da attendere
+- status: puntatore dove salvare lo status di uscita
+- options: opzioni di attesa (0 = attesa bloccante)
+- return: PID del processo terminato, -1 errore
+
+WIFEXITED(int status)
+---------------------
+Macro che verifica se il processo è terminato normalmente.
+- status: status da waitpid
+- return: true se terminato via exit/return
+
+WEXITSTATUS(int status)
+-----------------------
+Macro che estrae il codice di uscita.
+- status: status da waitpid
+- return: exit code (valido solo se WIFEXITED è true)
+
+WIFSIGNALED(int status)
+-----------------------
+Macro che verifica se il processo è stato terminato da un segnale.
+- status: status da waitpid
+- return: true se terminato da segnale
+
+WTERMSIG(int status)
+--------------------
+Macro che estrae il numero del segnale.
+- status: status da waitpid
+- return: numero segnale (valido solo se WIFSIGNALED è true)
+
+exit(int status)
+----------------
+Termina il processo corrente.
+- status: codice di uscita (0 = successo, altro = errore)
+- Usato nel figlio dopo l'esecuzione di f()
+
+strsignal(int sig)
+------------------
+Converte un numero di segnale in stringa descrittiva.
+- sig: numero del segnale
+- return: stringa descrittiva (es. "Segmentation fault")
+
+
+5. DIFFERENZE TRA EXIT NORMALE E SEGNALE
+==================================================================================
+
+5.1 Terminazione Normale (WIFEXITED)
+-------------------------------------
+Accade quando:
+- La funzione ritorna normalmente
+- La funzione chiama exit() esplicitamente
+- La funzione chiama return dal main
+
+Rilevamento:
+- WIFEXITED(status) == true
+- WEXITSTATUS(status) contiene il codice di uscita
+
+Nella sandbox:
+- exit(0) -> return 1 (successo)
+- exit(N) con N != 0 -> return 0 (fallimento)
+
+5.2 Terminazione da Segnale (WIFSIGNALED)
+------------------------------------------
+Accade quando:
+- Il processo crasha (SIGSEGV, SIGBUS, SIGFPE, etc.)
+- Il processo viene killato (SIGKILL, SIGTERM)
+- L'alarm scatta (SIGALRM)
+- Altri segnali non gestiti
+
+Rilevamento:
+- WIFSIGNALED(status) == true
+- WTERMSIG(status) contiene il numero del segnale
+
+Nella sandbox:
+- Qualsiasi segnale -> return 0 (fallimento)
+- SIGALRM distingue timeout da altri crash
+
+6. MEMORY E RESOURCE MANAGEMENT
+==================================================================================
+
+6.1 Memory Safety
+-----------------
+- fork() crea una COPIA del processo -> memoria separata
+- Modifiche nel figlio NON influenzano il padre
+- Se il figlio crasha, il padre è protetto
+
+6.2 Zombie Process Prevention
+------------------------------
+- waitpid() è ESSENZIALE per evitare processi zombie
+- Se il padre non chiama wait/waitpid, il figlio rimane zombie
+- La sandbox chiama sempre waitpid -> no zombie
+
+6.3 Resource Cleanup
+--------------------
+- Il figlio termina sempre (exit, segnale, o timeout)
+- Tutte le risorse del figlio vengono pulite dal kernel
+- Il padre continua normalmente
