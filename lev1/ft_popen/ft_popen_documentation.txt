@@ -1,0 +1,221 @@
+==================================================================================
+                        FT_POPEN DOCUMENTATION
+==================================================================================
+L’esercizio richiede di creare una funzione che esegua un programma esterno,
+collegando il processo padre (il programma chiamante) con il processo figlio
+(il comando eseguito) tramite una pipe.
+La funzione deve comportarsi come una versione semplificata di popen()
+della libreria C:
+-deve avviare l’eseguibile specificato da file con gli argomenti indicati in argv;
+-deve creare un canale di comunicazione tra padre e figlio;
+-deve restituire al chiamante un file descriptor per comunicare
+con il processo figlio. Se il parametro type è:
+            -'r': il padre deve poter leggere l’output del comando
+                    (cioè ciò che il figlio scrive su stdout);
+            -'w': il padre deve poter scrivere nell’input del comando
+                    (cioè ciò che il figlio leggerà da stdin).
+La funzione deve gestire correttamente la chiusura dei file descriptor
+per evitare perdite di risorse e deve restituire -1 in caso di errore
+o parametri non validi.
+
+==================================================================================
+                           FIRMA DELLA FUNZIONE
+==================================================================================
+
+int ft_popen(const char *file, char *const argv[], char type);
+==================================================================================
+
+
+
+1. COSA FA popen() IN LIBC
+==================================================================================
+
+La funzione popen() della libc permette di:
+- Creare un processo figlio che esegue un comando shell
+- Stabilire una comunicazione unidirezionale tra padre e figlio tramite pipe
+- Restituire un FILE* che permette di leggere l'output o scrivere l'input del
+  comando eseguito
+
+Prototipo libc: FILE *popen(const char *command, const char *type);
+
+Funzionamento:
+- type = "r": il processo padre può LEGGERE l'output del comando figlio
+- type = "w": il processo padre può SCRIVERE nell'input del comando figlio
+
+Esempio libc:
+    FILE *fp = popen("ls -l", "r");
+    // Legge l'output di "ls -l"
+
+
+2. DIFFERENZE CON FT_POPEN
+==================================================================================
+
+ft_popen vs popen:
+- popen() restituisce FILE*, ft_popen() restituisce int (file descriptor)
+- popen() accetta una stringa di comando, ft_popen() accetta file + argv[]
+- popen() usa /bin/sh, ft_popen() usa execvp direttamente
+- ft_popen() usa 'r' o 'w' come char, non come stringa
+
+
+3. CONCETTI FONDAMENTALI
+==================================================================================
+
+3.1 PIPE
+--------
+Una pipe è un canale di comunicazione unidirezionale con due estremità:
+- pipe_fd[0]: estremità di LETTURA (read end)
+- pipe_fd[1]: estremità di SCRITTURA (write end)
+
+Regola: ciò che scrivi in pipe_fd[1] può essere letto da pipe_fd[0]
+
+3.2 FORK
+--------
+fork() crea un processo figlio che è una copia del padre:
+- Restituisce 0 al figlio
+- Restituisce PID del figlio al padre
+- Restituisce -1 in caso di errore
+
+3.3 DUP2
+--------
+dup2(oldfd, newfd) duplica un file descriptor:
+- Chiude newfd se era aperto
+- Fa sì che newfd punti allo stesso file/pipe di oldfd
+- Usato per redirezionare stdin(0) o stdout(1)
+
+3.4 EXECVP
+----------
+execvp(file, argv) rimpiazza il processo corrente con un nuovo programma:
+- file: nome dell'eseguibile
+- argv: array di argomenti (deve terminare con NULL)
+- Cerca l'eseguibile nel PATH
+- NON ritorna se ha successo (il processo viene sostituito)
+
+
+4. LOGICA DI IMPLEMENTAZIONE
+==================================================================================
+
+4.1 SCENARIO type = 'r' (READ)
+-------------------------------
+Obiettivo: leggere l'OUTPUT del comando
+
+Flow:
+1. Padre crea pipe: pipe_fd[0] (read), pipe_fd[1] (write)
+2. fork() crea il figlio
+3. FIGLIO:
+   - Chiude pipe_fd[0] (non leggerà dalla pipe)
+   - dup2(pipe_fd[1], STDOUT_FILENO) -> stdout va nella pipe
+   - Chiude pipe_fd[1] (ora duplicato su stdout)
+   - execvp(file, argv) -> esegue il comando
+4. PADRE:
+   - Chiude pipe_fd[1] (non scriverà nella pipe)
+   - Restituisce pipe_fd[0] per leggere l'output del comando
+
+Esempio:
+    fd = ft_popen("ls", {"ls", NULL}, 'r');
+    read(fd, buffer, size); // Legge l'output di ls
+
+Diagramma:
+    [PADRE]                    [FIGLIO - ls]
+       |                              |
+       | pipe_fd[0] <---- pipe_fd[1]  | stdout (rediretto)
+       |                              |
+    read(fd) <-------- output "ls" ---
+
+
+4.2 SCENARIO type = 'w' (WRITE)
+-------------------------------
+Obiettivo: scrivere nell'INPUT del comando
+
+Flow:
+1. Padre crea pipe: pipe_fd[0] (read), pipe_fd[1] (write)
+2. fork() crea il figlio
+3. FIGLIO:
+   - Chiude pipe_fd[1] (non scriverà nella pipe)
+   - dup2(pipe_fd[0], STDIN_FILENO) -> stdin legge dalla pipe
+   - Chiude pipe_fd[0] (ora duplicato su stdin)
+   - execvp(file, argv) -> esegue il comando
+4. PADRE:
+   - Chiude pipe_fd[0] (non leggerà dalla pipe)
+   - Restituisce pipe_fd[1] per scrivere nell'input del comando
+
+Esempio:
+    fd = ft_popen("grep", {"grep", "pattern", NULL}, 'w');
+    write(fd, "text\n", 5); // Scrive nell'input di grep
+
+Diagramma:
+    [PADRE]                    [FIGLIO - grep]
+       |                              |
+       | pipe_fd[1] ----> pipe_fd[0]  | stdin (rediretto)
+       |                              |
+    write(fd) --------> input "grep" --->
+
+
+5. CONDIZIONI DA RISPETTARE
+==================================================================================
+
+5.1 Validazione Parametri
+--------------------------
+✓ file != NULL
+✓ argv != NULL
+✓ type == 'r' || type == 'w'
+✓ Se uno di questi fallisce -> return -1
+
+5.2 Gestione Errori
+-------------------
+✓ pipe() fallisce -> return -1
+✓ fork() fallisce -> return -1
+    - Importante: chiudere i pipe_fd creati prima di ritornare!
+
+5.3 No File Descriptor Leaks
+-----------------------------
+✓ Ogni fd aperto deve essere chiuso quando non serve più
+✓ Nel figlio: chiudere l'estremità della pipe non usata
+✓ Nel padre: chiudere l'estremità della pipe non usata
+✓ In caso di errore: chiudere tutti i fd aperti prima di return -1
+
+5.4 Processo Figlio
+-------------------
+✓ Dopo execvp() non serve altro codice (execvp non ritorna)
+✓ Se execvp() fallisce: chiamare exit(1) per terminare il figlio
+✓ NON fare return -1 nel figlio dopo execvp fallita!
+
+6. FUNZIONI CONSENTITE E IL LORO USO
+==================================================================================
+
+pipe(int pipefd[2])
+-------------------
+Crea una pipe per la comunicazione tra processi.
+- pipefd[0]: file descriptor per la lettura
+- pipefd[1]: file descriptor per la scrittura
+- return: 0 successo, -1 errore
+
+fork(void)
+----------
+Crea un processo figlio.
+- return: 0 nel figlio, PID nel padre, -1 errore
+
+dup2(int oldfd, int newfd)
+--------------------------
+Duplica un file descriptor.
+- oldfd: fd sorgente
+- newfd: fd destinazione (verrà chiuso se aperto)
+- return: newfd in caso di successo, -1 errore
+
+execvp(const char *file, char *const argv[])
+--------------------------------------------
+Esegue un programma.
+- file: nome dell'eseguibile (cerca nel PATH)
+- argv: array di argomenti terminante con NULL
+- return: non ritorna se ha successo, -1 in caso di errore
+
+close(int fd)
+-------------
+Chiude un file descriptor.
+- fd: file descriptor da chiudere
+- return: 0 successo, -1 errore
+
+exit(int status)
+----------------
+Termina il processo corrente.
+- status: codice di uscita
+- Usato nel figlio se execvp fallisce
