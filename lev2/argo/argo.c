@@ -197,11 +197,12 @@ int	parse_str(json *dst, FILE *stream)
 		}
 		if (c == '\\')
 		{
-			c = getc(stream);
-			if (c == EOF)
+			int escaped = getc(stream);
+			if (escaped == EOF)
 				return (unexpected(stream), free(buffer), -1);
-			if (c != '"' && c != '\\')
+			if (escaped != '"' && escaped != '\\')
 				return (unexpected(stream), free(buffer), -1);
+			c = escaped;
 		}
 		if (len + 1 >= capacity)
 		{
@@ -266,10 +267,7 @@ int	parse_map(json *dst, FILE *stream)
 int	parse_value(json *dst, FILE *stream)
 {
 	int	c = peek(stream);
-	if (c == EOF)
-		return (unexpected(stream), -1);
-	if (c == ' ')
-		return (unexpected(stream), -1);
+
 	if (c == '"')
 		return (parse_str(dst, stream));
 	else if (c == '{')
