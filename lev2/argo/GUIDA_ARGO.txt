@@ -1,0 +1,397 @@
+==================================================================================
+                    GUIDA COMPLETA ALL'ESERCIZIO ARGO
+                        Parser JSON in C
+==================================================================================
+
+L'esercizio ARGO richiede di scrivere un parser JSON che legga un file
+carattere per carattere e costruisca una rappresentazione ad albero (AST -
+Abstract Syntax Tree) del documento JSON. Il parser deve gestire solo tre
+tipi di dati: numeri interi, stringhe e mappe (oggetti), con regole
+particolari rispetto ai parser JSON standard.
+
+==================================================================================
+                        1. OBIETTIVO DELL'ESERCIZIO
+==================================================================================
+
+L'obiettivo è creare una funzione chiamata "argo" che prenda due parametri:
+un puntatore a una struttura json (dove salvare il risultato del parsing) e
+un FILE stream (da cui leggere il JSON). La funzione deve restituire 1 in
+caso di successo e -1 in caso di errore.
+
+La particolarità di questo parser è che gli spazi bianchi non devono essere
+ignorati come nei parser JSON normali, ma devono essere considerati caratteri
+invalidi che causano un errore. Questa è una differenza fondamentale rispetto
+ai parser JSON standard che solitamente ignorano gli spazi.
+
+Un'altra particolarità importante riguarda l'escaping nelle stringhe: mentre
+JSON supporta molti tipi di escape (come \n per newline, \t per tab, \u per
+unicode), questo esercizio richiede di gestire SOLO due tipi di escape: il
+backslash doppio (\\) e le virgolette escapate (\"). Qualsiasi altro tipo
+di escape deve essere considerato un errore.
+
+
+==================================================================================
+                    2. CONCETTI FONDAMENTALI DA COMPRENDERE
+==================================================================================
+
+Prima di iniziare a scrivere il codice, è essenziale comprendere alcuni
+concetti chiave che sono alla base del funzionamento del parser.
+
+Il primo concetto è quello di STREAM. Un stream è un flusso di dati che viene
+letto sequenzialmente, carattere per carattere. Non si può tornare indietro
+liberamente (anche se c'è un modo limitato per farlo con ungetc), e si
+procede sempre in avanti. Immagina di leggere un nastro: puoi avanzare, ma
+tornare indietro è complicato. Questo è molto diverso dal caricare tutto il
+file in memoria e poi analizzarlo.
+
+Il secondo concetto fondamentale è l'ABSTRACT SYNTAX TREE o AST. Un AST è
+una rappresentazione gerarchica ad albero della struttura del documento. Per
+esempio, se il JSON è {"nome":"Mario","età":30}, l'AST sarà un nodo di tipo
+MAP che contiene due coppie: una con chiave "nome" e valore STRING "Mario",
+e una con chiave "età" e valore NUMBER 30. Se ci sono mappe annidate, l'albero
+diventa più profondo.
+
+Il terzo concetto cruciale è la RICORSIONE. Poiché le mappe possono contenere
+altre mappe, che a loro volta possono contenere altre mappe, il parser deve
+essere ricorsivo. Quando si parsa una mappa, si deve chiamare la funzione che
+parsa i valori, che potrebbe a sua volta dover parsare un'altra mappa,
+creando così una chiamata ricorsiva.
+
+Il quarto concetto è il LOOKAHEAD, cioè guardare avanti senza consumare.
+Quando leggi un carattere dallo stream, lo consumi - il prossimo getc leggerà
+il carattere successivo. Ma a volte hai bisogno di "sbirciare" quale carattere
+sta arrivando senza consumarlo, per decidere quale funzione chiamare. Per
+questo esiste ungetc, che ti permette di rimettere UN carattere nello stream.
+
+
+==================================================================================
+                        3. LE FUNZIONI CONSENTITE
+==================================================================================
+
+L'esercizio permette di usare solo dieci funzioni specifiche. Vediamole in
+dettaglio, concentrandoci sul PERCHÉ sono utili in questo contesto.
+
+GETC è la funzione principale per leggere. Prende un carattere dallo stream
+e lo restituisce come intero (non char, perché deve poter distinguere EOF che
+vale -1 dai caratteri normali). Ogni volta che chiami getc, lo stream avanza
+di una posizione. Se arrivi alla fine del file, getc restituisce EOF. Questa
+funzione è il cuore del parser perché permette di processare il JSON carattere
+per carattere.
+
+UNGETC è il complemento di getc. Ti permette di "rimettere indietro" un
+carattere nello stream. Importante: puoi rimettere indietro SOLO UN carattere
+alla volta. Se provi a fare ungetc due volte di seguito, il comportamento non
+è garantito. Questa funzione è essenziale per il lookahead: leggi un carattere
+per capire cosa sta arrivando, poi lo rimetti indietro perché la funzione
+specializzata si aspetta di leggere quel carattere dall'inizio.
+
+PRINTF serve solo per stampare i messaggi di errore. Ce ne sono solo due tipi:
+"Unexpected token '%c'\n" quando incontri un carattere che non dovrebbe esserci,
+e "Unexpected end of input\n" quando il file finisce mentre ti aspettavi altri
+caratteri.
+
+MALLOC, CALLOC e REALLOC servono per allocare memoria dinamicamente. Malloc
+alloca un blocco di memoria di dimensione specificata, ma il contenuto è
+casuale (spazzatura). Calloc alloca e AZZERA la memoria (tutti i byte a zero).
+Realloc serve per ridimensionare un blocco già allocato, ed è fondamentale
+per le stringhe che crescono durante la lettura.
+
+FREE è essenziale per evitare memory leak. Ogni byte allocato con malloc,
+calloc o realloc DEVE essere liberato con free quando non serve più.
+
+ISDIGIT è una funzione di utilità che controlla se un carattere è una cifra
+decimale (da '0' a '9'). Serve per riconoscere l'inizio di un numero. Attenzione:
+il segno meno non è una cifra, quindi devi controllarlo separatamente.
+
+FSCANF è una funzione potente per leggere input formattato. Con il formato
+"%d" legge un intero, gestendo automaticamente il segno e le cifre. C'è però
+un PROBLEMA importante: fscanf con %d salta automaticamente gli spazi bianchi
+iniziali. Siccome nel nostro esercizio gli spazi sono errori, devi controllare
+la presenza di spazi PRIMA di chiamare fscanf, altrimenti verrebbero saltati
+silenziosamente.
+
+WRITE è una funzione di basso livello per scrivere su file descriptor.
+
+==================================================================================
+                    4. STRATEGIA GENERALE DI PARSING
+==================================================================================
+
+La strategia di parsing si basa su una struttura con una funzione
+centrale e tre funzioni specializzate.
+
+La funzione principale "argo" è semplicemente un wrapper che chiama la funzione
+di parsing dei valori e ne restituisce il risultato.
+
+La funzione dispatcher, che chiameremo "parse_value", ha il compito di capire
+che TIPO di valore sta arrivando. Lo fa leggendo il primo carattere e
+decidendo in base a quello. Se vede virgolette doppie, sa che sta arrivando
+una stringa. Se vede una parentesi graffa aperta, sa che sta arrivando una
+mappa. Se vede una cifra o un segno meno, sa che sta arrivando un numero.
+
+Se vede qualsiasi altra cosa (incluso uno spazio), è un errore.
+
+Una volta capito il tipo, il dispatcher rimette il carattere nello stream
+usando ungetc e chiama la funzione specializzata appropriata. Questo è
+importante: le funzioni specializzate si aspettano di leggere il carattere
+iniziale loro stesse.
+
+Le tre funzioni specializzate sono parse_number per i numeri, parse_string
+per le stringhe e parse_map per le mappe. Ognuna sa esattamente come parsare
+il proprio tipo e costruire la corrispondente parte dell'AST.
+
+==================================================================================
+                        5. PARSING DEI NUMERI
+==================================================================================
+
+Il parsing dei numeri è relativamente semplice perché puoi delegare il lavoro
+pesante a fscanf. Tuttavia ci sono alcune sottigliezze importanti.
+
+Prima di tutto devi verificare che il primo carattere sia effettivamente una
+cifra o un segno meno (o più, anche se i numeri positivi di solito non hanno
+il segno esplicito in JSON).
+
+Se vedi uno spazio, devi segnalare errore PRIMA
+di chiamare fscanf, altrimenti fscanf lo salterebbe.
+
+Una volta verificato che puoi procedere, usi fscanf con il formato "%d" per
+leggere un intero. Fscanf restituisce il numero di elementi letti con successo:
+se restituisce 1, tutto ok; se restituisce 0 o EOF, c'è stato un errore.
+
+Dopo aver letto il numero, devi salvarlo nella struttura json. Imposti il
+campo type a NUMBER e metti il valore nel campo data.number. Poi restituisci
+1 per indicare successo.
+
+Un dettaglio importante: fscanf si ferma quando incontra un carattere che non
+fa parte del numero, ma LASCIA quel carattere nello stream (non lo consuma).
+Questo è perfetto per il nostro caso, perché il prossimo getc leggerà
+esattamente quel carattere.
+
+==================================================================================
+                        6. PARSING DELLE STRINGHE
+==================================================================================
+
+Il parsing delle stringhe è più complesso perché devi gestire l'escaping e
+costruire il buffer dinamicamente man mano che leggi i caratteri.
+
+Inizi leggendo il primo carattere, che deve essere obbligatoriamente una
+virgoletta doppia. Se non lo è, errore. Poi allochi un buffer iniziale per
+la stringa. Una dimensione ragionevole per iniziare potrebbe essere 32 caratteri,
+ma dipende dai casi d'uso. L'importante è che il buffer possa crescere.
+
+Poi entri in un loop dove leggi carattere per carattere. Ad ogni carattere
+letto, controlli diverse possibilità.
+
+        Se il carattere è EOF, significa che la stringa non è stata chiusa correttamente.
+        Questo è un errore: devi stampare "Unexpected end of input", liberare il buffer
+        che avevi allocato, e restituire -1.
+
+        Se il carattere è un backslash, stai entrando in una sequenza di escape. Devi
+        leggere il prossimo carattere per capire cosa vuole escapare.
+
+                Se il prossimo
+                carattere è una virgoletta o un altro backslash, va bene: aggiungi quel
+                carattere al buffer (non il backslash, ma il carattere escapato).
+
+                Se il prossimo
+                carattere è EOF, errore di fine input inaspettata.
+
+                Se il prossimo
+                carattere è qualsiasi altra cosa (come 'n', 't', 'u', ecc.), è un errore
+                perché questo esercizio supporta solo due tipi di escape.
+
+        Se il carattere è una virgoletta doppia (e non sei in una sequenza di escape),
+        significa che la stringa è finita. Aggiungi il terminatore null alla fine del
+        buffer, salva il puntatore nella struttura json (impostando type a STRING e
+        data.string al buffer), e restituisci 1 per successo.
+
+        Se il carattere è qualsiasi altra cosa (lettere, numeri, spazi, punteggiatura),
+        lo aggiungi semplicemente al buffer. Prima di aggiungere, però, devi controllare
+        se c'è ancora spazio. Se il buffer è pieno (o quasi pieno, lasciando spazio
+        per il null terminator), devi ridimensionarlo con realloc.
+
+La strategia di ridimensionamento più efficiente è raddoppiare la capacità
+ogni volta. Se inizi con 32 e continui ad aggiungere +10 ogni volta, farai
+moltissime riallocazioni. Se invece raddoppi (32, 64, 128, 256...), il numero
+di riallocazioni cresce logaritmicamente rispetto alla lunghezza finale, che
+è molto più efficiente.
+
+Quando usi realloc, è FONDAMENTALE non perdere il puntatore originale. Non
+fare mai "buffer = realloc(buffer, nuova_size)" direttamente, perché se realloc
+fallisce restituisce NULL e tu perdi il riferimento al buffer originale,
+causando un memory leak. Usa invece una variabile temporanea: "temp =
+realloc(buffer, nuova_size); if (!temp) { free(buffer); return -1; } buffer = temp;".
+
+
+==================================================================================
+                        7. PARSING DELLE MAPPE
+==================================================================================
+
+Il parsing delle mappe è la parte più complessa perché coinvolge ricorsione,
+gestione di liste concatenate, e molti controlli.
+
+Una mappa in JSON ha il formato {chiave:valore,chiave:valore,...} dove le
+chiavi sono SEMPRE stringhe e i valori possono essere qualsiasi tipo (numeri,
+stringhe, o altre mappe).
+
+Inizi leggendo il primo carattere, che deve essere una graffa aperta. Se non
+lo è, errore. Poi devi controllare se la mappa è vuota. Leggi il prossimo
+carattere: se è una graffa chiusa, la mappa è vuota. Salvi NULL nel campo
+data.map, imposti type a MAP, e restituisci 1.
+
+Se non è una graffa chiusa, significa che ci sono coppie chiave-valore da
+leggere. Devi rimettere il carattere nello stream (con ungetc) ed entrare in
+un loop per processare le coppie.
+
+Ogni iterazione del loop processa una coppia. Prima parsi la chiave. La chiave
+DEVE essere una stringa, quindi chiami parse_string. Se parse_string fallisce,
+propagi l'errore. Se riesce, ottieni una struttura json di tipo STRING, e da
+questa estrai il puntatore alla stringa (che è la chiave).
+
+Dopo la chiave, ti aspetti due punti. Leggi il prossimo carattere: se non è
+':', errore. Se è EOF, errore di tipo "Unexpected end of input". Se è qualsiasi
+altra cosa, errore "Unexpected token".
+
+Dopo i due punti, parsi il valore. Il valore può essere qualsiasi tipo, quindi
+chiami parse_value (la funzione dispatcher). Questo è il punto di RICORSIONE:
+se il valore è un'altra mappa, parse_value chiamerà parse_map, che chiamerà
+parse_value per i suoi valori, e così via. Allochi una nuova struttura json
+per contenere il valore e la passi a parse_value.
+
+Una volta ottenuti chiave e valore, devi aggiungerli alla mappa. La mappa è
+implementata come una lista concatenata di nodi. Ogni nodo contiene tre campi:
+la chiave (puntatore a char), il valore (puntatore a json), e next (puntatore
+al prossimo nodo). Allochi un nuovo nodo, ci metti chiave e valore, e lo
+inserisci nella lista. L'inserimento più semplice è in testa: il next del
+nuovo nodo punta al vecchio primo nodo, e il nuovo nodo diventa il primo.
+
+Dopo aver aggiunto la coppia, devi controllare cosa viene dopo. Leggi il
+prossimo carattere. Se è una graffa chiusa, la mappa è finita: restituisci 1.
+Se è una virgola, ci sono altre coppie: continua il loop. Se è EOF o qualsiasi
+altra cosa, errore.
+
+Un aspetto cruciale è la gestione della memoria in caso di errore. Se durante
+il parsing di una coppia qualcosa fallisce, devi liberare TUTTO ciò che hai
+allocato fino a quel punto: la chiave (se l'hai già allocata), il valore (se
+l'hai già allocato), tutti i nodi precedenti della mappa, e tutte le sottostrutture
+ricorsive. Per questo è utile avere una funzione helper che liberi ricorsivamente
+una struttura json.
+
+
+==================================================================================
+                    8. GESTIONE DEGLI ERRORI
+==================================================================================
+
+La gestione degli errori è fondamentale e deve essere meticolosa. Ci sono due
+tipi di errori da segnalare.
+
+Il primo tipo è "Unexpected end of input", che si verifica quando il file
+finisce mentre ti aspettavi altri caratteri. Per esempio, se stai leggendo
+una stringa e arrivi a EOF senza aver trovato la virgoletta di chiusura. O
+se stai leggendo una mappa e arrivi a EOF prima della graffa di chiusura.
+Ogni volta che fai getc, devi controllare se il risultato è EOF e, se non te
+lo aspettavi in quel punto, segnalare questo errore.
+
+Il secondo tipo è "Unexpected token", che si verifica quando trovi un carattere
+che non dovrebbe esserci in quel contesto. Per esempio, se ti aspetti una
+virgoletta dopo una chiave e trovi invece un punto e virgola. O se incontri
+uno spazio bianco (che in questo esercizio è vietato). O se incontri un
+carattere completamente fuori contesto come una parentesi quadra (che
+introdurrebbe un array, ma gli array non sono supportati in questo esercizio).
+
+Quando segnali un errore, devi anche gestire la memoria. Se hai allocato
+strutture temporanee (buffer per stringhe, nodi json, nodi map), devi liberarle
+PRIMA di restituire -1. Questo previene memory leak. È facile dimenticarsene
+nei path di errore, quindi è importante ricontrollare ogni punto di uscita
+dalle funzioni.
+
+Un pattern comune è questo: allochi qualcosa, poi fai operazioni che potrebbero
+fallire, e in caso di fallimento liberi ciò che hai allocato e restituisci
+errore. Se tutto va bene, l'allocazione diventa parte dell'AST e verrà liberata
+dal chiamante quando tutto l'AST viene distrutto.
+
+
+==================================================================================
+                    9. ALLOCAZIONE DINAMICA E CRESCITA DEI BUFFER
+==================================================================================
+
+L'allocazione dinamica è al cuore di questo esercizio perché non sai in
+anticipo quanto saranno lunghe le stringhe o quante coppie chiave-valore ci
+saranno nelle mappe.
+
+Per le stringhe, la strategia migliore è partire con un buffer di dimensione
+modesta (tipo 32 caratteri) e raddoppiare ogni volta che serve più spazio.
+Mantieni due variabili: capacity (quanti caratteri può contenere il buffer)
+e length (quanti caratteri ci sono attualmente). Quando length si avvicina a
+capacity (ricorda di lasciare spazio per il null terminator!), fai realloc
+per raddoppiare capacity.
+
+Perché raddoppiare invece di aumentare di una quantità fissa? Perché il numero
+di riallocazioni cresce molto più lentamente. Se aumenti di 10 ogni volta e
+devi arrivare a 1000 caratteri, farai circa 100 riallocazioni. Se raddoppi,
+ne farai circa 6 (32, 64, 128, 256, 512, 1024). Ogni riallocazione ha un
+costo (copiare tutti i dati esistenti nel nuovo blocco), quindi ridurne il
+numero migliora significativamente le performance.
+
+Per i nodi della mappa, non c'è crescita da gestire perché ogni nodo è
+indipendente. Allochi un nodo per ogni coppia chiave-valore man mano che le
+leggi, e li colleghi in una lista concatenata.
+
+Per le strutture json che rappresentano valori, ne allochi una per ogni valore
+che parsi. Se hai una mappa con 5 coppie, allochi 5 strutture json per i
+valori (più eventualmente altre per le chiavi se sono stringhe, più la
+struttura json per la mappa stessa).
+
+
+==================================================================================
+                    10. RICORSIONE E ANNIDAMENTO
+==================================================================================
+
+La ricorsione è necessaria perché JSON permette annidamento arbitrario. Puoi
+avere una mappa dentro una mappa dentro una mappa, e così via.
+
+Quando parse_map incontra una coppia il cui valore è un'altra mappa, chiama
+parse_value per quel valore. Parse_value vede che inizia con '{' e chiama
+parse_map. Questa seconda chiamata a parse_map processa la mappa interna, che
+potrebbe a sua volta avere valori che sono mappe, causando ulteriori chiamate
+ricorsive.
+
+La ricorsione si ferma quando si raggiungono valori "foglia" (numeri o stringhe),
+che non contengono altre strutture. A quel punto si inizia a risalire,
+completando le mappe via via più esterne.
+
+È importante capire che ogni chiamata ricorsiva ha il suo stack frame separato,
+con le sue variabili locali. Le variabili di una chiamata a parse_map non
+interferiscono con quelle di un'altra chiamata a parse_map più in alto nello
+stack.
+
+L'unico limite alla profondità di annidamento è lo stack size. Se annidassi
+migliaia di mappe una dentro l'altra, potresti causare uno stack overflow.
+Ma per i casi normali non è un problema.
+
+
+==================================================================================
+                11. LOOKAHEAD E UNGETC
+==================================================================================
+
+Il lookahead è la tecnica di "sbirciare" il prossimo carattere senza consumarlo.
+È fondamentale nel parsing perché spesso hai bisogno di sapere cosa sta
+arrivando per decidere cosa fare, ma non vuoi consumare quel carattere perché
+la funzione che chiamerai si aspetta di leggerlo lei stessa.
+
+Il pattern è sempre lo stesso: fai getc per leggere il carattere, controlli
+cosa è, e poi fai ungetc per rimetterlo nello stream prima di chiamare la
+funzione appropriata.
+
+Per esempio, nella funzione dispatcher parse_value, leggi il primo carattere
+per capire se è una stringa, un numero, o una mappa. Poi lo rimetti indietro
+e chiami la funzione specializzata che si occuperà di leggere quel carattere
+e tutti quelli successivi.
+
+La limitazione importante di ungetc è che puoi rimettere indietro SOLO UN
+carattere alla volta. Se provi a fare due ungetc consecutive, il comportamento
+non è definito dallo standard. Quindi devi organizzare il codice in modo da
+non aver mai bisogno di rimettere indietro più di un carattere.
+
+Un'alternativa a ungetc sarebbe passare il carattere già letto come parametro
+alla funzione successiva, ma questo complica le signature delle funzioni.
+Ungetc è più pulito.
