@@ -2,34 +2,55 @@
 
 int	parse_int(json *dst, FILE *stream)
 {
-	int	c = peek(stream);
-	int	num;
+	int c = peek(stream);
+	int	num = 0;
 	int	matched;
 
 	if (c == EOF || (!isdigit(c) && c != '-'))
 		return (unexpected(stream), -1);
 	matched = fscanf(stream, "%d", &num);
-	if (matched != 1)
+	if(matched != 1)
 		return (unexpected(stream), -1);
 	dst->type = INTEGER;
 	dst->integer = num;
 	return (1);
 }
 
-int	parse_str(json *dst, FILE *stream)
+/*
+** parse_str: Parsa una stringa JSON dallo stream
+** 
+** Formato JSON per stringhe: "testo qui"
+** Supporta escape sequences:
+** - \" per includere virgolette
+** - \\ per includere backslash
+** 
+** Processo:
+** 1. Richiede " iniziale
+** 2. Legge caratteri in un buffer dinamico che cresce se necessario
+** 3. Gestisce escape sequences
+** 4. Termina alla " finale
+** 
+** Il buffer parte da 32 byte e raddoppia quando pieno.
+*/
+int	parse_string(json *dst, FILE *stream)
 {
+	/* La stringa deve iniziare con " */
 	if (!expect(stream, '"'))
 		return (-1);
+	/* Inizializza buffer dinamico */
 	size_t	capacity = 32;
 	size_t	len = 0;
 	char	*buffer = malloc(capacity);
 	if (!buffer)
 		return (-1);
+	/* Leggi caratteri fino a " finale */
 	while (1)
 	{
-		int c = getc(stream);
+		int	c = getc(stream);
+		/* EOF inaspettato */
 		if (c == EOF)
 			return (unexpected(stream), free(buffer), -1);
+		/* " finale trovata - stringa completa */
 		if (c == '"')
 		{
 			buffer[len] = '\0';
@@ -37,15 +58,23 @@ int	parse_str(json *dst, FILE *stream)
 			dst->string = buffer;
 			return (1);
 		}
+		/* Gestione escape sequences */
 		if (c == '\\')
 		{
-			int escaped = getc(stream);
+			int	escaped = getc(stream);
 			if (escaped == EOF)
 				return (unexpected(stream), free(buffer), -1);
-			if (escaped != '"' && escaped != '\\')
+				/* Supporta solo \" e \\ */
+			if (escaped == '"' || escaped == '\\')
+				c = escaped;
+			else
+			{
+				/* Escape non valido */
+				ungetc(escaped, stream);
 				return (unexpected(stream), free(buffer), -1);
-			c = escaped;
+			}
 		}
+		/* Espandi buffer se necessario (raddoppia capacità) */
 		if (len + 1 >= capacity)
 		{
 			capacity *= 2;
@@ -102,28 +131,30 @@ int parse_map(json *dst, FILE *stream)
 
 int	parse_value(json *dst, FILE *stream)
 {
-	int	c = peek(stream);
+	int	c = peek (stream);
 
 	if (c == '"')
-		return (parse_str(dst, stream));
+		return (parse_string(dst, stream));
 	else if (c == '{')
 		return (parse_map(dst, stream));
 	else if (isdigit(c) || c == '-')
 		return (parse_int(dst, stream));
 	else
-		return (unexpected(stream),-1);
+		return (unexpected(stream), -1);
 }
 
-int	argo(json *dst, FILE *stream)
+int	argo (json *dst, FILE *stream)
 {
 	if (parse_value(dst, stream) != 1)
 		return (-1);
 	if (peek(stream) != EOF)
-		return (unexpected(stream), free_json(*dst),-1);
+		return (unexpected(stream), free_json(*dst), -1);
 	return (1);
 }
 
-/*fornita*/
+/* ========================================================================== */
+/*                         FUNZIONE MAIN FORNITA                              */
+/* ========================================================================== */
 int	main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -144,3 +175,4 @@ int	main(int argc, char **argv)
 	fclose(stream);
 	return 0;
 }
+

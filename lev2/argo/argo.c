@@ -183,11 +183,8 @@ int	parse_int(json *dst, FILE *stream)
 */
 int	parse_str(json *dst, FILE *stream)
 {
-	/* La stringa deve iniziare con " */
 	if (!expect(stream, '"'))
 		return (-1);
-	
-	/* Inizializza buffer dinamico */
 	size_t	capacity = 32;
 	size_t	len = 0;
 	char	*buffer = malloc(capacity);
@@ -195,11 +192,9 @@ int	parse_str(json *dst, FILE *stream)
 		return (-1);
 	while (1)
 	{
-		int c = getc(stream);
-		/* Fine file inaspettata */
+		int	c = getc(stream);
 		if (c == EOF)
 			return (unexpected(stream), free(buffer), -1);
-		/* Fine stringa trovata */
 		if (c == '"')
 		{
 			buffer[len] = '\0';
@@ -207,17 +202,19 @@ int	parse_str(json *dst, FILE *stream)
 			dst->string = buffer;
 			return (1);
 		}
-		/* Gestione escape sequences */
 		if (c == '\\')
 		{
-			int escaped = getc(stream);
+			int	escaped = getc(stream);
 			if (escaped == EOF)
 				return (unexpected(stream), free(buffer), -1);
-			if (escaped != '"' && escaped != '\\')
+			if (escaped == '"' || escaped == '\\')
+				c = escaped;
+			else
+			{
+				ungetc(escaped, stream);
 				return (unexpected(stream), free(buffer), -1);
-			c = escaped;
+			}
 		}
-		/* Espandi il buffer se necessario */
 		if (len + 1 >= capacity)
 		{
 			capacity *= 2;
@@ -226,7 +223,7 @@ int	parse_str(json *dst, FILE *stream)
 				return (free(buffer), -1);
 			buffer = new_buffer;
 		}
-		buffer[len++] = c;		/* Aggiungi carattere al buffer */
+		buffer[len++] = c;
 	}
 }
 
