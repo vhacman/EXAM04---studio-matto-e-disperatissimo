@@ -2,21 +2,21 @@
 
 int	parse_int(json *dst, FILE *stream)
 {
-	int c = peek(stream);
+	int	c = peek(stream);
 	int	num;
 	int	matched;
 
 	if (c == EOF || (!isdigit(c) && c != '-'))
 		return (unexpected(stream), -1);
 	matched = fscanf(stream, "%d", &num);
-	if(matched != 1)
+	if (matched != 1)
 		return (unexpected(stream), -1);
 	dst->type = INTEGER;
 	dst->integer = num;
 	return (1);
 }
 
-int	parse_string(json *dst, FILE *stream)
+int	parse_str(json *dst, FILE *stream)
 {
 	if (!expect(stream, '"'))
 		return (-1);
@@ -27,7 +27,7 @@ int	parse_string(json *dst, FILE *stream)
 		return (-1);
 	while (1)
 	{
-		int	c = getc(stream);
+		int c = getc(stream);
 		if (c == EOF)
 			return (unexpected(stream), free(buffer), -1);
 		if (c == '"')
@@ -39,10 +39,10 @@ int	parse_string(json *dst, FILE *stream)
 		}
 		if (c == '\\')
 		{
-			int	escaped = getc(stream);
+			int escaped = getc(stream);
 			if (escaped == EOF)
 				return (unexpected(stream), free(buffer), -1);
-			if (escaped == '"' && escaped != '\\')
+			if (escaped != '"' && escaped != '\\')
 				return (unexpected(stream), free(buffer), -1);
 			c = escaped;
 		}
@@ -58,7 +58,17 @@ int	parse_string(json *dst, FILE *stream)
 	}
 }
 
-int	parse_map(json *dst, FILE *stream)
+static void	free_items(pair *items, size_t size)
+{
+	for (size_t i = 0; i < size; i++)
+	{
+		free(items[i].key);
+		free_json(items[i].value);
+	}
+	free(items);
+}
+
+int parse_map(json *dst, FILE *stream)
 {
 	pair	*items = NULL;
 	size_t	size = 0;
@@ -66,21 +76,23 @@ int	parse_map(json *dst, FILE *stream)
 
 	if (!expect(stream, '{'))
 		return (-1);
-	while(!accept(stream, '}'))
+	while (!accept(stream, '}'))
 	{
 		items = realloc(items, sizeof(pair) * (size + 1));
 		if (!items)
 			return (-1);
-		if(parse_string (&key, stream) == -1)
-			return (free (items), -1);
+		if (parse_str(&key, stream) == -1)
+			return (free_items(items, size), -1);
 		if (!expect(stream, ':'))
-			return (free(key.string), free(items), -1);
-		if (parse_value (&items[size].value, stream) == -1)
-			return (free(key.string), free(items), -1);
+			return (free(key.string), free_items(items, size), -1);
+		if (parse_value(&items[size].value, stream) == -1)
+			return (free(key.string), free_items(items, size), -1);
 		items[size].key = key.string;
 		size++;
 		if (!accept(stream, ',') && peek(stream) != '}')
-			return (unexpected(stream), free(items), -1);
+			return (free_items(items, size), unexpected(stream), -1);
+		if (peek(stream) == '}' && accept(stream, ','))
+			return (free_items(items, size), unexpected(stream), -1);
 	}
 	dst->type = MAP;
 	dst->map.size = size;
@@ -90,31 +102,28 @@ int	parse_map(json *dst, FILE *stream)
 
 int	parse_value(json *dst, FILE *stream)
 {
-	int	c = peek (stream);
+	int	c = peek(stream);
 
 	if (c == '"')
-		return (parse_string(dst, stream));
+		return (parse_str(dst, stream));
 	else if (c == '{')
 		return (parse_map(dst, stream));
 	else if (isdigit(c) || c == '-')
 		return (parse_int(dst, stream));
 	else
-		return (unexpected(stream), -1);
+		return (unexpected(stream),-1);
 }
 
-int	argo (json *dst, FILE *stream)
+int	argo(json *dst, FILE *stream)
 {
 	if (parse_value(dst, stream) != 1)
 		return (-1);
 	if (peek(stream) != EOF)
-		return (unexpected(stream), free_json(*dst), -1);
+		return (unexpected(stream), free_json(*dst),-1);
 	return (1);
 }
 
-
-/* ========================================================================== */
-/*                         FUNZIONE MAIN FORNITA                              */
-/* ========================================================================== */
+/*fornita*/
 int	main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -135,4 +144,3 @@ int	main(int argc, char **argv)
 	fclose(stream);
 	return 0;
 }
-

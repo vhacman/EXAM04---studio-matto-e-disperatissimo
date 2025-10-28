@@ -145,11 +145,15 @@ void	serialize(json j)
 /* ========================================================================== */
 /*                      FUNZIONI DA IMPLEMENTARE                              */
 /* ========================================================================== */
-
-/* Legge un numero intero dallo stream. Può iniziare con '-' per i negativi.
-** Usa fscanf
-** Esempi validi: 42, -17, 0
-** Esempi NON validi: 3.14 (no float!), "42" (è una stringa!), pippo
+/*
+** parse_int: Legge e parsa un numero intero dallo stream
+** @dst: Dove salvare il valore parsato
+** @stream: Lo stream da cui leggere
+** @return: 1 se successo, -1 se errore
+**
+** Legge un numero intero (può essere negativo con '-').
+** Usa fscanf per la conversione. Controlla prima che il carattere
+** successivo sia una cifra o un meno.
 */
 int	parse_int(json *dst, FILE *stream)
 {
@@ -168,16 +172,22 @@ int	parse_int(json *dst, FILE *stream)
 }
 
 /*
-** Le stringhe JSON sono racchiuse tra virgolette: "ciao mondo"
-** Caratteri speciali come \" e \\ devono essere escapati.
+** parse_str: Legge e parsa una stringa JSON dallo stream
+** @dst: Dove salvare la stringa parsata
+** @stream: Lo stream da cui leggere
+** @return: 1 se successo, -1 se errore
 **
-** La stringa viene allocata dinamicamente con un buffer che cresce
-** se necessario.
+** Le stringhe JSON sono racchiuse tra virgolette: "ciao mondo"
+** Supporta escape sequences: \" e \\
+** Alloca dinamicamente un buffer che cresce se necessario.
 */
 int	parse_str(json *dst, FILE *stream)
 {
+	/* La stringa deve iniziare con " */
 	if (!expect(stream, '"'))
 		return (-1);
+	
+	/* Inizializza buffer dinamico */
 	size_t	capacity = 32;
 	size_t	len = 0;
 	char	*buffer = malloc(capacity);
@@ -186,8 +196,10 @@ int	parse_str(json *dst, FILE *stream)
 	while (1)
 	{
 		int c = getc(stream);
+		/* Fine file inaspettata */
 		if (c == EOF)
 			return (unexpected(stream), free(buffer), -1);
+		/* Fine stringa trovata */
 		if (c == '"')
 		{
 			buffer[len] = '\0';
@@ -195,6 +207,7 @@ int	parse_str(json *dst, FILE *stream)
 			dst->string = buffer;
 			return (1);
 		}
+		/* Gestione escape sequences */
 		if (c == '\\')
 		{
 			int escaped = getc(stream);
@@ -204,6 +217,7 @@ int	parse_str(json *dst, FILE *stream)
 				return (unexpected(stream), free(buffer), -1);
 			c = escaped;
 		}
+		/* Espandi il buffer se necessario */
 		if (len + 1 >= capacity)
 		{
 			capacity *= 2;
@@ -212,43 +226,79 @@ int	parse_str(json *dst, FILE *stream)
 				return (free(buffer), -1);
 			buffer = new_buffer;
 		}
-		buffer[len++] = c;
+		buffer[len++] = c;		/* Aggiungi carattere al buffer */
 	}
 }
 
-/* Una mappa è tipo: {"nome": "Mario", "età": 35, "indirizzo": {...}}
-** Struttura: { "chiave1": valore1, "chiave2": valore2, ... }
+/*
+** free_items: Libera un array parziale di coppie chiave-valore
+** @items: Array di coppie da liberare
+** @size: Numero di elementi nell'array
 **
-** Le chiavi sono SEMPRE stringhe.
-** I valori possono essere qualsiasi tipo JSON (int, string, o altra mappa).
+** Funzione helper per parse_map. Usata per cleanup in caso di errore
+** durante il parsing di una mappa.
+*/
+static void	free_items(pair *items, size_t size)
+{
+	for (size_t i = 0; i < size; i++)
+	{
+		free(items[i].key);
+		free_json(items[i].value);
+	}
+	free(items);
+}
+
+/*
+** parse_map: Legge e parsa una mappa (oggetto) JSON dallo stream
 ** @dst: Dove salvare la mappa parsata
 ** @stream: Lo stream da cui leggere
 ** @return: 1 se successo, -1 se errore
+**
+** Struttura: { "chiave1": valore1, "chiave2": valore2, ... }
+** Le chiavi sono SEMPRE stringhe.
+** I valori possono essere qualsiasi tipo JSON (int, string, o altra mappa).
+** Gestisce anche mappe vuote: {}
 */
-int	parse_map(json *dst, FILE *stream)
+int parse_map(json *dst, FILE *stream)
 {
 	pair	*items = NULL;
 	size_t	size = 0;
 	json	key;
 
+	/* La mappa deve iniziare con { */
 	if (!expect(stream, '{'))
 		return (-1);
+	/* Loop finché non troviamo } */
 	while (!accept(stream, '}'))
 	{
+		/* Espandi l'array per la nuova coppia */
 		items = realloc(items, sizeof(pair) * (size + 1));
 		if (!items)
 			return (-1);
+
+		/* Parsa la chiave (deve essere una stringa) */
 		if (parse_str(&key, stream) == -1)
-			return (free(items),-1);
+			return (free_items(items, size), -1);
+
+		/* Richiede i due punti dopo la chiave */
 		if (!expect(stream, ':'))
-			return (free(key.string), free(items), -1);
+			return (free(key.string), free_items(items, size), -1);
+
+		/* Parsa il valore (può essere qualsiasi tipo) */
 		if (parse_value(&items[size].value, stream) == -1)
-			return (free(key.string), free(items), -1);
+			return (free(key.string), free_items(items, size), -1);
+		/* Salva la coppia chiave-valore */
 		items[size].key = key.string;
 		size++;
+
+		/* Gestisce la virgola tra elementi */
 		if (!accept(stream, ',') && peek(stream) != '}')
-			return (unexpected(stream), free(items), -1);
+			return (free_items(items, size), unexpected(stream), -1);
+		/* Errore: virgola finale prima di } */
+		if (peek(stream) == '}' && accept(stream, ','))
+			return (free_items(items, size), unexpected(stream), -1);
 	}
+	/* Salva la mappa completa */
 	dst->type = MAP;
 	dst->map.size = size;
 	dst->map.data = items;
@@ -256,13 +306,16 @@ int	parse_map(json *dst, FILE *stream)
 }
 
 /*
-** Un valore può essere:
-** - Una stringa (inizia con ")
-** - Un numero (inizia con cifra o -)
-** - Una mappa (inizia con {)
+** parse_value: Determina il tipo di valore e chiama il parser appropriato
 ** @dst: Dove salvare il valore parsato
 ** @stream: Lo stream da cui leggere
 ** @return: 1 se successo, -1 se errore
+**
+** Funzione dispatcher che guarda il primo carattere per decidere
+** quale parser chiamare:
+** - " → stringa
+** - { → mappa
+** - cifra o - → intero
 */
 int	parse_value(json *dst, FILE *stream)
 {
@@ -279,15 +332,20 @@ int	parse_value(json *dst, FILE *stream)
 }
 
 /*
-** Se trovi altro dopo il JSON valido = errore!
+** argo: Funzione principale di parsing JSON
 ** @dst: Dove salvare il JSON parsato
 ** @stream: Lo stream da cui leggere
 ** @return: 1 se successo, -1 se errore
+**
+** Parsa un valore JSON completo e verifica che non ci sia
+** altro contenuto dopo di esso. Se c'è contenuto extra,
+** è un errore (il JSON deve essere completo e unico).
 */
 int	argo(json *dst, FILE *stream)
 {
 	if (parse_value(dst, stream) != 1)
 		return (-1);
+	/* Verifica che non ci sia nient'altro dopo il JSON */
 	if (peek(stream) != EOF)
 		return (unexpected(stream), free_json(*dst),-1);
 	return (1);
