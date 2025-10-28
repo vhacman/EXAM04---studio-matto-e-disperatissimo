@@ -14,9 +14,9 @@ int	peek(FILE *stream)
 void	unexpected(FILE *stream)
 {
 	if (peek(stream) != EOF)
-		printf("unexpected token '%c'\n", peek(stream));
+		printf("Unexpected token '%c'\n", peek(stream));
 	else
-		printf("unexpected end of input\n");
+		printf("Unexpected end of input\n");
 }
 
 int	accept(FILE *stream, char c)

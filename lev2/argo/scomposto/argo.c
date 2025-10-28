@@ -16,41 +16,20 @@ int	parse_int(json *dst, FILE *stream)
 	return (1);
 }
 
-/*
-** parse_str: Parsa una stringa JSON dallo stream
-** 
-** Formato JSON per stringhe: "testo qui"
-** Supporta escape sequences:
-** - \" per includere virgolette
-** - \\ per includere backslash
-** 
-** Processo:
-** 1. Richiede " iniziale
-** 2. Legge caratteri in un buffer dinamico che cresce se necessario
-** 3. Gestisce escape sequences
-** 4. Termina alla " finale
-** 
-** Il buffer parte da 32 byte e raddoppia quando pieno.
-*/
-int	parse_string(json *dst, FILE *stream)
+int	parse_str(json *dst, FILE *stream)
 {
-	/* La stringa deve iniziare con " */
 	if (!expect(stream, '"'))
 		return (-1);
-	/* Inizializza buffer dinamico */
 	size_t	capacity = 32;
 	size_t	len = 0;
 	char	*buffer = malloc(capacity);
 	if (!buffer)
 		return (-1);
-	/* Leggi caratteri fino a " finale */
 	while (1)
 	{
 		int	c = getc(stream);
-		/* EOF inaspettato */
 		if (c == EOF)
 			return (unexpected(stream), free(buffer), -1);
-		/* " finale trovata - stringa completa */
 		if (c == '"')
 		{
 			buffer[len] = '\0';
@@ -58,23 +37,19 @@ int	parse_string(json *dst, FILE *stream)
 			dst->string = buffer;
 			return (1);
 		}
-		/* Gestione escape sequences */
 		if (c == '\\')
 		{
 			int	escaped = getc(stream);
 			if (escaped == EOF)
 				return (unexpected(stream), free(buffer), -1);
-				/* Supporta solo \" e \\ */
 			if (escaped == '"' || escaped == '\\')
 				c = escaped;
 			else
 			{
-				/* Escape non valido */
 				ungetc(escaped, stream);
 				return (unexpected(stream), free(buffer), -1);
 			}
 		}
-		/* Espandi buffer se necessario (raddoppia capacità) */
 		if (len + 1 >= capacity)
 		{
 			capacity *= 2;
@@ -96,7 +71,6 @@ static void	free_items(pair *items, size_t size)
 	}
 	free(items);
 }
-
 int parse_map(json *dst, FILE *stream)
 {
 	pair	*items = NULL;
@@ -118,9 +92,16 @@ int parse_map(json *dst, FILE *stream)
 			return (free(key.string), free_items(items, size), -1);
 		items[size].key = key.string;
 		size++;
-		if (!accept(stream, ',') && peek(stream) != '}')
-			return (free_items(items, size), unexpected(stream), -1);
-		if (peek(stream) == '}' && accept(stream, ','))
+		if (peek(stream) == ',')
+		{
+			getc(stream);
+			int next = peek(stream);
+			ungetc(',', stream);
+			if (next == '}')
+				return (free_items(items, size), unexpected(stream), -1);
+			accept(stream, ',');
+		}
+		else if (peek(stream) != '}')
 			return (free_items(items, size), unexpected(stream), -1);
 	}
 	dst->type = MAP;
@@ -134,7 +115,7 @@ int	parse_value(json *dst, FILE *stream)
 	int	c = peek (stream);
 
 	if (c == '"')
-		return (parse_string(dst, stream));
+		return (parse_str(dst, stream));
 	else if (c == '{')
 		return (parse_map(dst, stream));
 	else if (isdigit(c) || c == '-')
@@ -155,6 +136,7 @@ int	argo (json *dst, FILE *stream)
 /* ========================================================================== */
 /*                         FUNZIONE MAIN FORNITA                              */
 /* ========================================================================== */
+/*cosi ha dei leak perche manca fclose(stream), free_json(file)*/
 int	main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -170,9 +152,8 @@ int	main(int argc, char **argv)
 		return 1;
 	}
 	serialize(file);
+	// free_json(file);
+	// fclose(stream);
 	printf("\n");
-	free_json(file);
-	fclose(stream);
 	return 0;
 }
-

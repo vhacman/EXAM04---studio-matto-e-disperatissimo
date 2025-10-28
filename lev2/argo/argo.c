@@ -261,41 +261,45 @@ int parse_map(json *dst, FILE *stream)
 	pair	*items = NULL;
 	size_t	size = 0;
 	json	key;
-
-	/* La mappa deve iniziare con { */
+	
+	/* Expect opening brace for JSON object */
 	if (!expect(stream, '{'))
 		return (-1);
-	/* Loop finché non troviamo } */
+	/* Parse key-value pairs until closing brace */
 	while (!accept(stream, '}'))
 	{
-		/* Espandi l'array per la nuova coppia */
+		/* Expand array to accommodate new pair */
 		items = realloc(items, sizeof(pair) * (size + 1));
 		if (!items)
 			return (-1);
-
-		/* Parsa la chiave (deve essere una stringa) */
+		/* Parse the key (must be a string) */
 		if (parse_str(&key, stream) == -1)
 			return (free_items(items, size), -1);
-
-		/* Richiede i due punti dopo la chiave */
+		/* Expect colon separator between key and value */
 		if (!expect(stream, ':'))
 			return (free(key.string), free_items(items, size), -1);
-
-		/* Parsa il valore (può essere qualsiasi tipo) */
+		/* Parse the value */
 		if (parse_value(&items[size].value, stream) == -1)
 			return (free(key.string), free_items(items, size), -1);
-		/* Salva la coppia chiave-valore */
+		/* Store key and increment size */
 		items[size].key = key.string;
 		size++;
-
-		/* Gestisce la virgola tra elementi */
-		if (!accept(stream, ',') && peek(stream) != '}')
-			return (free_items(items, size), unexpected(stream), -1);
-		/* Errore: virgola finale prima di } */
-		if (peek(stream) == '}' && accept(stream, ','))
+		/* Handle comma separator between pairs */
+		if (peek(stream) == ',')
+		{
+			getc(stream);
+			int next = peek(stream);
+			ungetc(',', stream);
+			/* Trailing comma before closing brace is invalid */
+			if (next == '}')
+				return (free_items(items, size), unexpected(stream), -1);
+			accept(stream, ',');
+		}
+		/* If not comma, must be closing brace */
+		else if (peek(stream) != '}')
 			return (free_items(items, size), unexpected(stream), -1);
 	}
-	/* Salva la mappa completa */
+	/* Store parsed map in destination */
 	dst->type = MAP;
 	dst->map.size = size;
 	dst->map.data = items;
@@ -351,6 +355,7 @@ int	argo(json *dst, FILE *stream)
 /* ========================================================================== */
 /*                         FUNZIONE MAIN FORNITA                              */
 /* ========================================================================== */
+/*cosi ha dei leak perche manca fclose(stream), free_json(file)*/
 int	main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -366,8 +371,8 @@ int	main(int argc, char **argv)
 		return 1;
 	}
 	serialize(file);
+	// free_json(file);
+	// fclose(stream);
 	printf("\n");
-	free_json(file);
-	fclose(stream);
 	return 0;
 }
