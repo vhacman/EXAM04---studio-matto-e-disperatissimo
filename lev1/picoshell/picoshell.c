@@ -1,151 +1,127 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   picoshell.c                                        :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: vhacman <vhacman@student.42.fr>            +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2025/10/23 17:17:00 by vhacman           #+#    #+#             */
-/*   Updated: 2025/10/23 17:23:48 by vhacman          ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
-
 #include <unistd.h>
-#include <sys/wait.h>
 #include <stdlib.h>
+#include <sys/wait.h>
 #include <stdio.h>
-
 /*
-** execute_child: Esegue il comando nel processo figlio
-**
-** Parametri:
-**   - cmd: array di stringhe con il comando e i suoi argomenti
-**   - prev: file descriptor dello stdin da un comando precedente (-1 se nessuno)
-**   - fd[2]: pipe per collegare al comando successivo [0]=lettura, [1]=scrittura
-**   - has_next_cmd: flag che indica se c'è un comando successivo
-**
-** Operazioni:
-**   1. Se esiste un comando precedente (prev != -1):
-**      - Reindirizza lo stdin dal pipe precedente usando dup2()
-**      - Chiude il vecchio file descriptor
-**   2. Se esiste un comando successivo (has_next_cmd):
-**      - Reindirizza lo stdout sulla pipe per il prossimo comando
-**   3. Chiude tutti i file descriptor non utilizzati (prevenzione di leak)
-**   4. Esegue il comando con execvp() che sostituisce il processo figlio
-**   5. Se execvp() fallisce, esce con codice 1
+  Variabili:
+	- pid: pid del processo figlio
+	- fd[2]: file descriptors per la pipe
+	- prev_fd: file descriptor per l'input del comando corrente
+	- status: stato di terminazione del processo figlio
+	- exit_code: codice di uscita complessivo
+	- i: indice del comando corrente
+  Flusso:
+	- Crea la pipe se non è l'ultimo comando.
+	- Errore pipe: se accade, chiude prev_fd (se valido) e ritorna 1.
+	- Crea un nuovo processo con fork.
+	- Errore fork:
+		se la pipe esiste, chiude fd[0] e fd[1]; chiude prev_fd (se valido)
+		e ritorna 1.
+	- Processo figlio:
+		* Se non è il primo comando, duplica prev_fd su STDIN; poi chiude
+		  prev_fd.
+		* Se non è l'ultimo comando, chiude il lato di lettura della pipe,
+		  duplica fd[1] su STDOUT e chiude fd[1].
+		* Esegue il comando con execvp; se fallisce, termina con exit(1).
+	- Processo padre:
+		* Chiude l'fd di input del comando precedente, se presente.
+		* Se non è l'ultimo comando, chiude il lato di scrittura della
+		  pipe e salva fd[0] in prev_fd per il prossimo comando.
+	- Attende la terminazione di tutti i processi figli; se uno termina
+	  con errore (WIFEXITED e WEXITSTATUS != 0), imposta exit_code a 1.
+	- Ritorna exit_code come codice di uscita complessivo.
 */
-void	execute_child(char **cmd, int prev, int fd[2], int has_next_cmd)
+int	picoshell(char **cmds[])
 {
-	if (prev != -1)
+	pid_t	pid;
+	int		fd[2];
+	int		prev_fd = -1;
+	int		status;
+	int		exit_code = 0;
+	int		i = 0;
+	while (cmds[i])
 	{
-		if (dup2(prev, STDIN_FILENO) == -1)
-			exit(1);
-		close(prev);
-	}
-	if (has_next_cmd)
-	{
-		if (dup2(fd[1], STDOUT_FILENO) == -1)
-			exit(1);
-	}
-	close(fd[0]);
-	close(fd[1]);
-	execvp(cmd[0], cmd);
-	exit(1);
-}
-
-/*
-** fork_execute: Crea un nuovo processo figlio e lo configura per eseguire il comando
-**
-** Parametri:
-**   - cmd: array di stringhe con il comando e i suoi argomenti
-**   - prev: puntatore al file descriptor dello stdin precedente (viene aggiornato)
-**   - fd[2]: pipe creata per il comando successivo
-**   - has_next_cmd: flag che indica se c'è un comando successivo
-**
-** Operazioni (nel processo padre):
-**   1. Crea un fork() e controlla se ha successo
-**   2. Nel processo figlio (pid == 0): chiama execute_child()
-**   3. Nel processo padre:
-**      - Chiude il precedente file descriptor di input se era aperto
-**      - Salva il file descriptor di lettura della pipe per il prossimo comando
-**      - Chiude il file descriptor di scrittura (non serve al padre)
-**
-** Ritorno: 0 in caso di successo, 1 in caso di errore del fork()
-*/
-int	fork_execute(char **cmd, int *prev, int fd[2], int has_next_cmd)
-{
-	pid_t pid = fork();
-	if (pid == -1)
-		return (close(fd[0]), close(fd[1]), 1);
-	if (pid == 0)
-		execute_child(cmd, *prev, fd, has_next_cmd);
-	if (*prev != -1)
-		close(*prev);
-
-	/* Salva fd[0] per il prossimo comando, o -1 se è l'ultimo */
-	*prev = has_next_cmd ? fd[0] : -1;
-
-	if (has_next_cmd)
-		close(fd[1]);
-	return (0);
-}
-
-/*
-** picoshell: Gestisce l'esecuzione di una pipeline di comandi
-**
-** Parametri:
-**   - cmds: array di array di stringhe (ogni array è un comando con i suoi argomenti)
-**           L'ultimo elemento deve essere NULL per marcare la fine
-**
-** Operazioni:
-**   1. Inizializza fd e prev (prev memorizza il file descriptor del comando precedente)
-**   2. Per ogni comando in cmds:
-**      - Se non è l'ultimo comando, crea una pipe() per collegarlo al prossimo
-**      - Chiama fork_execute() per creare e eseguire il processo figlio
-**   3. Attende che tutti i processi figli terminino con wait()
-**   4. Chiude il file descriptor di input rimasto (se esiste)
-**   5. Ritorna 0 se tutto va bene, 1 se ci sono errori
-*/
-int	picoshell(char ***cmds)
-{
-	int	fd[2];
-	int	prev = -1;
-	int	i = -1;
-
-	fd[0] = -1;
-	fd[1] = -1;
-	for (i = 0; cmds[i] != NULL; i++)
-	{
-		if (cmds[i + 1] != NULL)
-			pipe(fd);
-		if (fork_execute(cmds[i], &prev, fd, cmds[i + 1] != NULL) != 0)
+		if (cmds[i + 1] && (pipe(fd) == -1)) {
+			if (prev_fd != -1) close(prev_fd);
 			return (1);
+		}
+		pid = fork();
+		if (pid == -1) {
+			if (cmds[i + 1]) {
+				close(fd[0]);
+				close(fd[1]);
+			}
+			if (prev_fd != -1) close(prev_fd);
+			return (1);
+		}
+		if (pid == 0) {
+			if (prev_fd != -1) {
+				if (dup2(prev_fd, STDIN_FILENO) == -1) exit(1);
+				close(prev_fd);
+			}
+			if (cmds[i + 1]) {
+				close(fd[0]);
+				if (dup2(fd[1], STDOUT_FILENO) == -1) exit(1);
+				close(fd[1]);
+			}
+			execvp(cmds[i][0], cmds[i]);
+			exit(1);
+		}
+		if (prev_fd != -1) close(prev_fd);
+		if (cmds[i + 1]) {
+			close(fd[1]);
+			prev_fd = fd[0];
+		}
+		i++;
 	}
-	while (wait(NULL) > 0);
-	if (prev >= 0)
-		close(prev);
-	return (0);
+	while (wait(&status) != -1){
+		if (WIFEXITED(status) && WEXITSTATUS(status) != 0) exit_code = 1;
+	}
+	return (exit_code);
 }
 
-// int	main()
+// int	main(void)
 // {
-// 	char	*cmd1[] = {"ls", "-la", NULL};
-// 	char	*cmd2[] = {"grep", ".c", NULL};
-// 	char	*cmd3[] = {"wc", "-l", NULL};
-// 	char	*cmd4[] = {"echo", "Hello World!", NULL};
-// 	char	*cmd5[] = {"nonexisting", NULL};
+// 	// Test 1: ls | grep picoshell
+// 	printf("=== Test 1: ls | grep picoshell ===\n");
+// 	char *cmd1[] = {"ls", NULL};
+// 	char *cmd2[] = {"grep", "picoshell", NULL};
+// 	char **cmds1[] = {cmd1, cmd2, NULL};
+// 	int result1 = picoshell(cmds1);
+// 	printf("Result: %d\n\n", result1);
 
-// 	char	**pipe1[] = {cmd1, cmd2, cmd3, NULL};
-// 	char	**pipe2[] = {cmd4, NULL};
-// 	char	**pipe3[] = {cmd5, NULL};
-// 	char	**pipe4[] = {cmd1, NULL};
-// 	printf("Running pipe: ls -la | grep .c | wc -l\n");
-// 	printf("Pipe returned: %d\n\n", picoshell(pipe1));
-// 	printf("Running pipe: echo \"Hello World!\"\n");
-// 	printf("Pipe returned: %d\n\n", picoshell(pipe2));
-// 	printf("Running pipe: nonexisting\n");
-// 	printf("Pipe returned: %d\n\n", picoshell(pipe3));
-// 	printf("Running pipe: ls -la\n");
-// 	printf("Pipe returned: %d\n", picoshell(pipe4));
+// 	// Test 2: echo 'squalala' | cat | sed 's/a/b/g'
+// 	printf("=== Test 2: echo 'squalala' | cat | sed 's/a/b/g' ===\n");
+// 	char *cmd3[] = {"echo", "squalala", NULL};
+// 	char *cmd4[] = {"cat", NULL};
+// 	char *cmd5[] = {"sed", "s/a/b/g", NULL};
+// 	char **cmds2[] = {cmd3, cmd4, cmd5, NULL};
+// 	int result2 = picoshell(cmds2);
+// 	printf("Result: %d\n\n", result2);
+
+// 	// Test 3: echo 'hello' | wc -c
+// 	printf("=== Test 3: echo 'hello' | wc -c ===\n");
+// 	char *cmd6[] = {"echo", "hello", NULL};
+// 	char *cmd7[] = {"wc", "-c", NULL};
+// 	char **cmds3[] = {cmd6, cmd7, NULL};
+// 	int result3 = picoshell(cmds3);
+// 	printf("Result: %d\n\n", result3);
+
+// 	// Test 4: pwd | cat
+// 	printf("=== Test 4: pwd | cat ===\n");
+// 	char *cmd8[] = {"pwd", NULL};
+// 	char *cmd9[] = {"cat", NULL};
+// 	char **cmds4[] = {cmd8, cmd9, NULL};
+// 	int result4 = picoshell(cmds4);
+// 	printf("Result: %d\n\n", result4);
+
+// 	// Test 5: cat /etc/hostname | tr a-z A-Z
+// 	printf("=== Test 5: cat /etc/hostname | tr a-z A-Z ===\n");
+// 	char *cmd10[] = {"cat", "/etc/hostname", NULL};
+// 	char *cmd11[] = {"tr", "a-z", "A-Z", NULL};
+// 	char **cmds5[] = {cmd10, cmd11, NULL};
+// 	int result5 = picoshell(cmds5);
+// 	printf("Result: %d\n\n", result5);
+
 // 	return (0);
 // }

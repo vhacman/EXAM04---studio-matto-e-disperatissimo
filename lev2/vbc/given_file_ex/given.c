@@ -1,3 +1,8 @@
+//NON E' OBBLIGATORIO UTILIZZARE QUETSE FUNZIONI IN FASE DI ESAME, LA SCELTA
+//È DELLO STUDENTE. L'ESERCIZIO SI PUO SVOLGERE ANCHE SENZA.
+//SE SI DECIDE DI UTILIZZARLO BISOGNA TENERE CONTO CHE ALCUNE FUNZIONI SONO
+// ** DA CORREGGERE** 
+
 #include <stdio.h>
 #include <malloc.h> // change this to <stdlib.h>
 #include <ctype.h>
@@ -68,7 +73,7 @@ node    *parse_expr(char *s)
 {
     //...
 
-    if (*s) 
+    if (*s)
     {
         destroy_tree(ret);
         return (NULL);

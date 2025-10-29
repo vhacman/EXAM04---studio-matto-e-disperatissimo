@@ -37,7 +37,7 @@ int ft_sum()
 int	ft_factor()
 {
 	int	n;
-	
+
 	skip_whitespace();
 	if(isdigit(*s))
 		return(*s++ - '0');
